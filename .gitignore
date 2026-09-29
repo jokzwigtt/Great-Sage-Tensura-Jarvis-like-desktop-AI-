@@ -1,0 +1,14 @@
+# Personal files Great Sage creates when you run it - never upload these.
+# config.json can contain your Claude API key.
+config.json
+# What the Sage remembers about you, your reminders, and which apps you open.
+memory.json
+alarms.json
+usage.json
+# Your custom icon picture and the backup of the original icon.
+/icon.png
+/icon.jpg
+sage_original.ico
+__pycache__/
+*.pyc
+.venv/

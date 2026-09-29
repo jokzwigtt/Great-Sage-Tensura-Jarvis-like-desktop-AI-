@@ -1,0 +1,20 @@
+customtkinter
+requests
+psutil
+pyttsx3
+sounddevice
+numpy
+faster-whisper
+pillow
+mss
+ddgs
+beautifulsoup4
+# Windows only
+uiautomation; sys_platform == "win32"
+keyboard; sys_platform == "win32"
+winrt-runtime; sys_platform == "win32"
+winrt-Windows.Foundation; sys_platform == "win32"
+winrt-Windows.Foundation.Collections; sys_platform == "win32"
+winrt-Windows.Media.Control; sys_platform == "win32"
+# Linux only
+pynput; sys_platform == "linux"
