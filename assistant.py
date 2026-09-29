@@ -61,7 +61,7 @@ def play_chime():
 CONFIG_FILE = APP_DIR / "config.json"
 MEMORY_FILE = APP_DIR / "memory.json"
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
     "provider": "ollama",                 # "ollama" or "claude"
@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "vision_model": "gemma4:12b",         # model used to look at the screen (local mode)
     "ollama_think": False,                # True = slower but more careful reasoning
     "ollama_url": "http://localhost:11434",
-    "claude_model": "claude-sonnet-4-5",  # change to any current Claude model name
+    "claude_model": "claude-sonnet-5-5",  # change to any current Claude model name
     "claude_api_key": "",
     "assistant_name": "Great Sage",
     "user_title": "Master",               # what the Sage calls you; say "call me ..." to change it
@@ -84,6 +84,9 @@ DEFAULT_CONFIG = {
     "mind_pinned": ["spotify", "steam", "discord", "crunchyroll", "brave"],
     "mind_most_used": 4,                  # plus your most used apps...
     "mind_app_count": 12,                 # ...and random ones, up to this many
+    "phone_link_enabled": True,           # let the Great Sage Android app use this PC's brain on your Wi-Fi
+    "phone_link_port": 47632,
+    "phone_link_code": "",                # 6-digit pairing code, created on first run
     "hotkey": "ctrl+alt+;",               # press Ctrl+Alt+; to show / hide the Great Sage
     "weather_location": "",               # e.g. "Brooklyn"; empty = detect from your internet connection
     "temperature_unit": "fahrenheit",     # or "celsius"
@@ -104,6 +107,8 @@ def save_json(path, data):
 _saved = load_json(CONFIG_FILE, {})
 if _saved.get("config_version", 1) < 2:                  # upgrade older setups to the new model
     _saved.pop("ollama_model", None)
+if _saved.get("claude_model") == "claude-sonnet-4-5":   # old default model -> current one
+    _saved.pop("claude_model")
 if _saved.get("hotkey") == "f12+[":                      # old default shortcut -> Ctrl+Alt+;
     _saved.pop("hotkey")
 _saved["config_version"] = CONFIG_VERSION
@@ -834,6 +839,23 @@ def system_prompt(extra=""):
 # ---------------------------------------------------------------- brains
 
 
+def ollama_chat(msgs, tools):
+    """One request to the local Ollama model."""
+    payload = {"model": config["ollama_model"], "messages": msgs, "tools": tools, "stream": False,
+               "options": {"num_ctx": 16384}}
+    if config.get("ollama_think") is not None:
+        payload["think"] = config["ollama_think"]
+    r = requests.post(f"{config['ollama_url']}/api/chat", timeout=600, json=payload)
+    if r.status_code == 400 and "think" in r.text:      # model without a thinking mode
+        payload.pop("think")
+        r = requests.post(f"{config['ollama_url']}/api/chat", timeout=600, json=payload)
+    if r.status_code == 404:
+        raise RuntimeError(f"Model '{config['ollama_model']}' isn't downloaded. "
+                           f"Run: ollama pull {config['ollama_model']}")
+    r.raise_for_status()
+    return r.json()["message"]
+
+
 class OllamaBrain:
     def __init__(self):
         self.history = []
@@ -843,19 +865,7 @@ class OllamaBrain:
                  "parameters": {"type": "object", "properties": p, "required": r}}} for n, d, p, r in TOOLS]
 
     def _call(self, msgs):
-        payload = {"model": config["ollama_model"], "messages": msgs, "tools": self.tools(), "stream": False,
-                   "options": {"num_ctx": 16384}}
-        if config.get("ollama_think") is not None:
-            payload["think"] = config["ollama_think"]
-        r = requests.post(f"{config['ollama_url']}/api/chat", timeout=600, json=payload)
-        if r.status_code == 400 and "think" in r.text:      # model without a thinking mode
-            payload.pop("think")
-            r = requests.post(f"{config['ollama_url']}/api/chat", timeout=600, json=payload)
-        if r.status_code == 404:
-            raise RuntimeError(f"Model '{config['ollama_model']}' isn't downloaded. "
-                               f"Run: ollama pull {config['ollama_model']}")
-        r.raise_for_status()
-        return r.json()["message"]
+        return ollama_chat(msgs, self.tools())
 
     def chat(self, text, runner, extra=""):
         self.history.append({"role": "user", "content": text})
@@ -2060,6 +2070,16 @@ class App(ctk.CTk):
         self.row, self.bottom = row, bottom
 
         self._setup_hotkey()
+        self.phone_link = None
+        if config.get("phone_link_enabled", True):
+            try:
+                self.phone_link = PhoneLink(self)
+            except Exception as e:
+                self.after(1500, lambda: self.add_message(config["assistant_name"],
+                                                          f"Notice. The phone link could not start: {e}"))
+        if self.phone_link and not config.get("phone_link_shown"):
+            self._save("phone_link_shown", True)
+            self.after(2500, self.show_phone_info)
         if config["wake_word_enabled"]:
             self.wake.start()
         if config["live_screen_enabled"]:
@@ -2310,6 +2330,16 @@ class App(ctk.CTk):
         self.after(8000, lambda: self.orb.mode == "listening" and not self.listening and not self.busy
                    and self.set_state("idle", self.idle_text()))
 
+    def show_phone_info(self):
+        if not self.phone_link:
+            msg = "Notice. The phone link is turned off. Set phone_link_enabled to true in config.json."
+        else:
+            msg = (f"Report. To connect the Great Sage phone app, open its settings and enter the PC address "
+                   f"{self.phone_link.address()} and the pairing code {config['phone_link_code']}. "
+                   f"Your phone must be on the same Wi-Fi as this PC.")
+        self.add_message(config["assistant_name"], msg, typewriter=True)
+        self.speak(msg.split(" To connect")[0] + " Phone link details are on screen.")
+
     def on_follow_up(self):
         """The Sage asked a question (e.g. a suggestion): answer with just "yes" or "no"."""
         self.set_state("listening", "Awaiting your answer...  (yes / no)")
@@ -2333,6 +2363,9 @@ class App(ctk.CTk):
             return
         if _MIND_RE.search(text):
             self.open_mind()
+            return
+        if _PHONE_INFO_RE.search(text):
+            self.show_phone_info()
             return
         if _REPORT_RE.match(text):
             self._quick(lambda: build_status_report(self.scheduler))
@@ -2385,6 +2418,143 @@ class App(ctk.CTk):
                 self.after(0, lambda: self.send(text) if text else
                            self.set_state("idle", "Notice. No speech detected."))
             threading.Thread(target=work, daemon=True).start()
+
+
+# ---------------------------------------------------------------- phone link (for the Android app)
+
+# Tools the phone may use that run here on the PC. The phone sends its own phone-side tools too.
+PHONE_PC_TOOLS = [
+    ("web_search", "web_search", "Search the internet. You MUST use this before answering any factual question about "
+                                 "the world. Returns titles, links and snippets.", {"query": {"type": "string"}}, ["query"]),
+    ("read_webpage", "read_webpage", "Read the main text of a web page, to check details from search results.",
+     {"url": {"type": "string"}}, ["url"]),
+    ("pc_open_app", "open_app", "Open an app on the user's PC (not the phone).", {"name": {"type": "string"}}, ["name"]),
+    ("pc_open_website", "open_website", "Open a website or search in Brave on the user's PC (not the phone).",
+     {"query": {"type": "string"}}, ["query"]),
+    ("pc_media_control", "media_control", "Control music/volume on the user's PC: play, pause, next, previous, "
+                                          "volume_up, volume_down, set_volume (amount = percent), mute.",
+     {"action": {"type": "string"}, "amount": {"type": "number"}}, ["action"]),
+    ("pc_now_playing", "now_playing", "What is playing on the user's PC.", {}, []),
+    ("pc_status_report", "status_report", "Status report of the user's PC: CPU, GPU, RAM, weather, reminders.", {}, []),
+]
+
+
+def lan_ip():
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s_:
+            s_.connect(("10.255.255.255", 1))
+            return s_.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+class PhoneLink:
+    """A small private web service on your home network. The Great Sage phone app sends it a conversation;
+    it answers with this PC's local model and runs web searches / PC controls here.
+    Protected by a 6-digit pairing code, and only reachable from private (home) network addresses."""
+    def __init__(self, app):
+        import random
+        from http.server import ThreadingHTTPServer
+        self.app = app
+        if not str(config.get("phone_link_code", "")).strip():
+            config["phone_link_code"] = f"{random.SystemRandom().randint(0, 999999):06d}"
+            save_json(CONFIG_FILE, config)
+        self.port = int(config["phone_link_port"])
+        self.httpd = ThreadingHTTPServer(("0.0.0.0", self.port), self._handler())
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def address(self):
+        return f"{lan_ip()}:{self.port}"
+
+    def _handler(self):
+        import hmac, ipaddress
+        from http.server import BaseHTTPRequestHandler
+        link = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _allowed(self):
+                try:
+                    ip = ipaddress.ip_address(self.client_address[0])
+                    if not (ip.is_private or ip.is_loopback):
+                        return False
+                except ValueError:
+                    return False
+                given = self.headers.get("X-Sage-Code", "")
+                return hmac.compare_digest(given.encode(), str(config["phone_link_code"]).encode())
+
+            def do_GET(self):
+                if not self._allowed():
+                    return self._send(403, {"error": "wrong pairing code"})
+                if self.path.startswith("/ping"):
+                    return self._send(200, {"ok": True, "name": config["assistant_name"],
+                                            "title": config.get("user_title", ""), "model": config["ollama_model"]})
+                self._send(404, {"error": "not found"})
+
+            def do_POST(self):
+                if not self._allowed():
+                    return self._send(403, {"error": "wrong pairing code"})
+                try:
+                    length = min(int(self.headers.get("Content-Length", 0)), 4_000_000)
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    if self.path.startswith("/llm"):
+                        return self._send(200, link.handle_llm(payload))
+                    self._send(404, {"error": "not found"})
+                except requests.exceptions.ConnectionError:
+                    self._send(503, {"error": "The local AI (Ollama) isn't running on the PC."})
+                except Exception as e:
+                    self._send(500, {"error": str(e)})
+        return Handler
+
+    def handle_llm(self, payload):
+        """Run the phone's conversation through the local model. PC tools run here; phone tools are handed back."""
+        pc_map = {name: method for name, method, *_ in PHONE_PC_TOOLS}
+        pc_specs = [{"type": "function", "function": {"name": n, "description": d,
+                     "parameters": {"type": "object", "properties": p, "required": r}}}
+                    for n, _m, d, p, r in PHONE_PC_TOOLS]
+        msgs = list(payload.get("messages", []))
+        tools = list(payload.get("tools", [])) + pc_specs
+        start, used = len(msgs), []
+        self.app.after(0, lambda: self.app.status.configure(text="Answering your phone..."))
+        try:
+            for _ in range(8):
+                msg = ollama_chat(msgs, tools)
+                msg.pop("thinking", None)
+                msgs.append(msg)
+                calls = msg.get("tool_calls") or []
+                pending = []
+                for c in calls:
+                    f = c.get("function", {})
+                    name, args = f.get("name", ""), f.get("arguments") or {}
+                    if isinstance(args, str):
+                        args = json.loads(args or "{}")
+                    if name in pc_map:
+                        used.append(name)
+                        msgs.append({"role": "tool", "content": self.app.runner.run(pc_map[name], args),
+                                     "tool_name": name})
+                    else:
+                        pending.append({"name": name, "arguments": args})
+                if pending or not calls:
+                    text = "" if calls else re.sub(r"<think>.*?</think>", "", msg.get("content", ""), flags=re.S).strip()
+                    return {"new_messages": msgs[start:], "pending_calls": pending, "final_text": text, "used": used}
+            return {"new_messages": msgs[start:], "pending_calls": [], "used": used,
+                    "final_text": "Notice. I could not complete that request."}
+        finally:
+            self.app.after(0, lambda: self.app.set_state("idle", self.app.idle_text()))
+
+
+_PHONE_INFO_RE = re.compile(r"\b(phone link|pair (my )?phone|connect (my )?phone|link (my )?phone)\b", re.I)
 
 
 def single_instance(port=47631):

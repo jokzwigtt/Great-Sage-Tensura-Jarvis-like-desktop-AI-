@@ -130,6 +130,36 @@ configuration has been tested, so your results may vary.
 - The "most-used apps" in the mind view come from apps you've opened through the Sage.
 - Apps whose icon only exists as an SVG show their first letter instead.
 
+## Android app (beta)
+
+A phone version of the Great Sage, with the same orb, voice and personality. It can **replace Google's
+assistant**: hold the power button and the Great Sage opens instead of Gemini.
+
+- **Mixed brain:** when your phone is on the same Wi-Fi as your PC, it thinks with your PC's free local AI
+  (and can control the PC: "pause the music on my PC", "PC status report"). Away from home, it switches
+  to Claude (needs an API key).
+- **On the phone:** open apps, open sites in Brave, timers, alarms, reminders, music and volume, calls and
+  texts (you press call/send), status report (battery, weather, next alarm), memory, suggestions and
+  fact-checked answers.
+- Works on Android 8.0 or newer. iPhone isn't supported, because Apple doesn't allow replacing Siri.
+
+**Install:**
+1. Download **`GreatSage.apk`** from this repo's **Releases** page on your phone.
+2. Open it and allow your browser to install apps when Android asks.
+3. In the app, tap **⚙**:
+   - **At home:** on your PC, say or type **"phone link"** to the Great Sage. Enter the PC address and
+     pairing code it shows. The first time, Windows may ask to allow Python on **private networks**; click **Allow**.
+   - **Away from home:** add a Claude API key.
+4. Tap **Open assistant settings** and choose **Great Sage** as the *Digital assistant app*.
+   On Samsung, also set *Side button, then Press and hold* to *Digital assistant*.
+
+**Notes:**
+- There's no always-on wake word on the phone. Android reserves the low-power "Hey Google" hardware
+  for Google, so use the power button or tap the orb.
+- When the Sage asks you a question ("Shall I do that instead?"), it listens for your answer automatically.
+- The APK is built automatically by GitHub (`.github/workflows/android.yml`). It isn't on the Play Store,
+  and none is needed.
+
 ## Things to say
 
 | Say | What happens |
@@ -169,6 +199,9 @@ Want your own icon? Save a picture as `icon.png` in the folder and run `set_icon
 With the local brain, your conversations, voice, screen and memory never leave your PC. Web searches go
 out only for fact-checking and the weather. Your personal files (`config.json`, `memory.json`,
 `alarms.json`, `usage.json`) are listed in `.gitignore`. **Never upload `config.json`; it can hold your API key.**
+
+**Phone link:** the PC only accepts phone connections from your home network, and only with the
+6-digit pairing code. Turn it off with `"phone_link_enabled": false` in `config.json`.
 
 ## Disclaimer
 

@@ -12,3 +12,9 @@ sage_original.ico
 __pycache__/
 *.pyc
 .venv/
+# Android build output
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
