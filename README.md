@@ -46,6 +46,9 @@ to Claude for a smarter brain.
 - **Memory.** Tell it things about you and it remembers them between sessions (stored locally in `memory.json`).
 - **Desktop widget.** Sits in the upper-right corner (borderless on Windows), and shrinks to just the orb.
   Global shortcut: **Ctrl+Alt+;**
+- **Natural AI voice.** It speaks with [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a free voice that runs
+  offline on your PC. Say *"change your voice to bella"* (or heart, emma, isabella, sky, michael, george...) or
+  *"what voices do you have?"*. The voice downloads once (~120 MB) the first time you run it.
 - **Say "goodbye"** and it signs off and closes itself.
 
 ![Orb states](docs/orb-states.png)
@@ -153,7 +156,12 @@ assistant**: hold the power button and the Great Sage opens instead of Gemini.
 4. Tap **Open assistant settings** and choose **Great Sage** as the *Digital assistant app*.
    On Samsung, also set *Side button, then Press and hold* to *Digital assistant*.
 
+**Free everywhere, no Claude needed:** install the free [Tailscale](https://tailscale.com) app on your PC and your phone
+(same account). Then enter your PC's Tailscale address (100.x.x.x) plus `:47632` in the app settings and choose
+**PC only**. Your phone can then reach your PC's brain and voice from anywhere, at no cost.
+
 **Notes:**
+- When connected to your PC, the phone speaks with the PC's natural voice. Otherwise it uses the phone's own voice.
 - There's no always-on wake word on the phone. Android reserves the low-power "Hey Google" hardware
   for Google, so use the power button or tap the orb.
 - When the Sage asks you a question ("Shall I do that instead?"), it listens for your answer automatically.

@@ -26,6 +26,7 @@ echo "=== 2/4 Python packages ==="
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install kokoro-onnx --ignore-requires-python || echo "The AI voice could not be installed - espeak will be used instead."
 
 echo "=== 3/4 Ollama (local AI brain) ==="
 if ! command -v ollama >/dev/null; then

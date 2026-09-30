@@ -75,6 +75,17 @@ DEFAULT_CONFIG = {
     "user_title": "Master",               # what the Sage calls you; say "call me ..." to change it
     "speak_replies": True,
     "whisper_model": "base.en",
+    "tts_engine": "kokoro",               # "kokoro" = natural AI voice (free, offline); "clone" = your own voice clip; "system" = Windows/espeak voice
+    "tts_voice": "af_heart",              # say "change your voice to bella" to switch
+    "tts_speed": 1.0,
+    "clone_voice_file": "",               # a clean 5-12 second WAV of the voice to copy (used when tts_engine is "clone")
+    "clone_voice_text": "",               # exact words spoken in that clip; empty = read the .txt next to it, or auto-transcribe
+    "clone_model": "f5",                  # "f5" = F5-TTS (closest copy), "chatterbox" = Chatterbox
+    "clone_steps": 32,                    # F5-TTS quality steps: 16 = faster, 32 = better
+    "clone_exaggeration": 0.5,            # Chatterbox only: 0.3 = flat and calm, 0.7+ = more expressive
+    "clone_cfg": 0.5,                     # Chatterbox only: lower = slower, more deliberate pacing
+    "voice_effect": True,                 # subtle "inner system voice" echo on the Sage's voice
+    "display_mode": "overlay",            # "overlay" = floating orb on the desktop (Windows); "window" = classic panel
     "wake_word_enabled": True,            # say "Great Sage, ..." hands-free
     "live_screen_enabled": False,         # keep a live view of your screen in context
     "hide_from_screen_capture": True,     # the Sage's own window won't appear in its screen views
@@ -113,8 +124,22 @@ if _saved.get("hotkey") == "f12+[":                      # old default shortcut 
     _saved.pop("hotkey")
 _saved["config_version"] = CONFIG_VERSION
 config = {**DEFAULT_CONFIG, **_saved}
+if "tts_engine" not in _saved and (APP_DIR / "voice" / "great_sage.wav").exists():
+    config["tts_engine"] = "clone"                       # a copy that comes with the Great Sage voice uses it
 save_json(CONFIG_FILE, config)
 memory = load_json(MEMORY_FILE, [])
+
+# Kokoro: a small, natural-sounding AI voice that runs offline on your PC (Apache 2.0).
+KOKORO_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+KOKORO_MODEL, KOKORO_VOICES_FILE = "kokoro-v1.0.int8.onnx", "voices-v1.0.bin"
+VOICE_NAMES = {   # friendly name -> Kokoro voice id
+    "heart": "af_heart", "bella": "af_bella", "nicole": "af_nicole", "sarah": "af_sarah", "aoede": "af_aoede",
+    "kore": "af_kore", "nova": "af_nova", "sky": "af_sky", "alloy": "af_alloy", "emma": "bf_emma",
+    "isabella": "bf_isabella", "alice": "bf_alice", "lily": "bf_lily", "michael": "am_michael",
+    "fenrir": "am_fenrir", "puck": "am_puck", "george": "bm_george", "fable": "bm_fable",
+}
+
+
 
 # ---------------------------------------------------------------- honesty / verification
 
@@ -602,6 +627,10 @@ TOOLS = [
     ("open_path", "Open a file or folder with its default program.",
      {"path": {"type": "string"}}, ["path"]),
     ("system_info", "Get the current time, date, CPU, RAM, disk and battery status.", {}, []),
+    ("set_voice", "Change your speaking voice. Voices: " + ", ".join(VOICE_NAMES) + ". (heart and bella are the "
+                  "most natural; emma, isabella, alice and lily are British; michael, fenrir, puck, george and "
+                  "fable are male. 'cloned' uses the voice clip set in clone_voice_file.)",
+     {"name": {"type": "string"}}, ["name"]),
     ("set_user_title", "Change what you call the user (default 'Master'), e.g. 'Matt' or 'boss'. "
                        "Use 'none' if they don't want a title.",
      {"title": {"type": "string"}}, ["title"]),
@@ -727,6 +756,29 @@ class ToolRunner:
         if b:
             info.append(f"Battery: {b.percent}%{' (charging)' if b.power_plugged else ''}")
         return "\n".join(info)
+
+    def t_set_voice(self, name):
+        key = name.strip().lower()
+        nv = self.app.voice.neural
+        if key in ("cloned", "clone", "custom", "my voice", "original", "sage", "great sage"):
+            if not config.get("clone_voice_file") and not (APP_DIR / "voice" / "great_sage.wav").exists():
+                return "No voice clip is set. Put a WAV path in clone_voice_file in config.json."
+            config["tts_engine"] = "clone"
+            save_json(CONFIG_FILE, config)
+            nv.start()
+            return "Voice changed to the cloned voice." if nv.ready else \
+                "Switching to the cloned voice. It will be used as soon as it finishes loading."
+        vid = VOICE_NAMES.get(key) or (key if key in VOICE_NAMES.values() else None)
+        if not vid:
+            return f"Unknown voice '{name}'. Available: {', '.join(VOICE_NAMES)}."
+        config["tts_voice"] = vid
+        config["tts_engine"] = "kokoro"
+        save_json(CONFIG_FILE, config)
+        nv.start()
+        if not nv.ready:
+            return (f"Voice set to {key}, but the voice model isn't loaded yet"
+                    f"{' (' + nv.error + ')' if nv.error else ' (it may still be downloading)'}.")
+        return f"Voice changed to {key}."
 
     def t_set_user_title(self, title):
         t = "" if title.strip().lower() in ("none", "nothing", "no title", "") else title.strip()
@@ -939,6 +991,213 @@ def loudness(rms, floor_db, top_db):
     return max(0.0, min(1.0, (db - floor_db) / (top_db - floor_db)))
 
 
+def sage_effect(x, sr):
+    """An original 'voice inside your head' treatment: a faint doubled voice plus a short airy echo."""
+    import numpy as np
+    x = np.asarray(x, dtype=np.float32)
+    tail = int(sr * 0.25)
+    y = np.concatenate([x, np.zeros(tail, dtype=np.float32)])
+    d = int(sr * 0.011)
+    y[d:d + len(x)] += 0.20 * x                                   # doubling
+    for ms, gain in ((37, 0.16), (53, 0.12), (79, 0.08), (113, 0.05), (167, 0.03)):
+        k = int(sr * ms / 1000)
+        y[k:k + len(x)] += gain * x                               # short, fading reflections
+    peak = float(np.max(np.abs(y))) or 1.0
+    return (y / max(1.0, peak * 1.05)).astype(np.float32)
+
+
+class NeuralVoice:
+    """Loads the AI voice in the background: Kokoro (downloads ~120 MB on first run),
+    or a cloned voice made from your own clip with F5-TTS or Chatterbox (tts_engine = "clone")."""
+    def __init__(self):
+        self.k = None              # Kokoro
+        self.cb = None             # Chatterbox (cloned voice)
+        self.f5 = None             # F5-TTS (cloned voice)
+        self.ref_text = ""
+        self.cb_ref = None         # which clip the cloned voice was built from
+        self.engine = None         # engine that is loaded right now
+        self.ready = False
+        self.error = ""
+        self.lock = threading.Lock()
+        self.loading = threading.Lock()
+        self.on_status = None
+
+    def start(self):
+        """(Re)load the engine chosen in config. Safe to call again after switching voices."""
+        engine = config.get("tts_engine", "kokoro")
+        if engine == "clone":
+            threading.Thread(target=self._load_clone, daemon=True).start()
+        elif engine == "kokoro":
+            self.engine = "kokoro"
+            self.ready = self.k is not None
+            if not self.k:
+                threading.Thread(target=self._load, daemon=True).start()
+
+    def _load_clone(self):
+        with self.loading:
+            ref = str(config.get("clone_voice_file", "")).strip()
+            if ref and not Path(ref).is_absolute():
+                ref = str(APP_DIR / ref)                  # e.g. "voice/great_sage.wav" inside the Great Sage folder
+            if not (ref and Path(ref).exists()) and (APP_DIR / "voice" / "great_sage.wav").exists():
+                ref = str(APP_DIR / "voice" / "great_sage.wav")   # the voice kept in the Great Sage folder
+            use_f5 = config.get("clone_model", "f5") == "f5"
+            if self.cb_ref == ref and (self.f5 if use_f5 else self.cb):
+                self.engine, self.ready = "clone", True
+                return
+            try:
+                if not ref or not Path(ref).exists():
+                    raise FileNotFoundError(f"voice clip not found: {ref or '(clone_voice_file is empty)'}")
+                self._status("Loading the cloned voice (first time downloads the model, a few GB)...")
+                for name in ("stdout", "stderr"):             # started from the shortcut (no console):
+                    if getattr(sys, name) is None:           # give download progress bars somewhere to write
+                        setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+                import torch
+                if not torch.cuda.is_available():
+                    raise RuntimeError("no NVIDIA graphics card found - the cloned voice would be far too slow")
+                device = "cuda"
+                if use_f5:
+                    import torchaudio
+                    if not getattr(torchaudio.load, "_sage", False):
+                        # newer torchaudio needs FFmpeg to open audio; read the clip with soundfile instead
+                        import soundfile as sf
+
+                        def _load(path, *a, **k):
+                            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+                            return torch.from_numpy(data.T.copy()), sr
+                        _load._sage = True
+                        torchaudio.load = _load
+                    from f5_tts.api import F5TTS
+                    text = str(config.get("clone_voice_text", "")).strip()
+                    txt = Path(ref).with_suffix(".txt")
+                    if not text and txt.exists():
+                        text = txt.read_text(encoding="utf-8").strip()
+                    if text and not text.endswith((".", "!", "?")):
+                        text += "."
+                    if self.f5 is None:
+                        self.f5 = F5TTS(device=device)
+                    self.ref_text = text              # empty = F5-TTS transcribes the clip itself
+                else:
+                    from chatterbox.tts import ChatterboxTTS
+                    if self.cb is None:
+                        self.cb = ChatterboxTTS.from_pretrained(device=device)
+                    with self.lock:
+                        self.cb.prepare_conditionals(ref, exaggeration=float(config.get("clone_exaggeration", 0.5)))
+                self.cb_ref = ref
+                self.engine, self.ready, self.error = "clone", True, ""
+            except Exception as e:
+                self.error = f"cloned voice unavailable ({e})"
+                if self.k:                                    # keep talking with Kokoro meanwhile
+                    self.engine, self.ready = "kokoro", True
+                else:
+                    self._load()
+            finally:
+                self._status(None)
+
+    def _status(self, msg):
+        if self.on_status:
+            self.on_status(msg)
+
+    def _load(self):
+        try:
+            from kokoro_onnx import Kokoro
+            folder = APP_DIR / "voice_model"
+            folder.mkdir(exist_ok=True)
+            for name in (KOKORO_MODEL, KOKORO_VOICES_FILE):
+                target = folder / name
+                if not target.exists():
+                    self._status("Downloading the Great Sage's voice (one time, about 120 MB)...")
+                    part = target.with_name(name + ".part")
+                    with requests.get(KOKORO_BASE + name, stream=True, timeout=60) as r:
+                        r.raise_for_status()
+                        with open(part, "wb") as out:
+                            for chunk in r.iter_content(1 << 20):
+                                out.write(chunk)
+                    part.replace(target)
+            self.k = Kokoro(str(folder / KOKORO_MODEL), str(folder / KOKORO_VOICES_FILE))
+            if self.engine != "clone":
+                self.engine = "kokoro"
+            self.ready = True
+            self._status(None)
+        except Exception as e:
+            self.error = str(e)
+            self._status(None)
+
+    @staticmethod
+    def voice_id():
+        v = str(config.get("tts_voice", "af_heart")).strip().lower()
+        return VOICE_NAMES.get(v, v)
+
+    @staticmethod
+    def _chunks(text, limit=240):
+        """Split long replies into sentence groups - the cloned voice stays clearer on short pieces."""
+        parts, cur = [], ""
+        for s in re.split(r"(?<=[.!?])\s+", text.strip()):
+            if cur and len(cur) + len(s) > limit:
+                parts.append(cur)
+                cur = s
+            else:
+                cur = f"{cur} {s}".strip()
+        if cur:
+            parts.append(cur)
+        return parts or [text]
+
+    def _synth_clone(self, text):
+        import numpy as np
+        out, sr = [], int(self.cb.sr)
+        gap = np.zeros(int(sr * 0.12), dtype=np.float32)
+        with self.lock:
+            for piece in self._chunks(text):
+                wav = self.cb.generate(piece, exaggeration=float(config.get("clone_exaggeration", 0.5)),
+                                       cfg_weight=float(config.get("clone_cfg", 0.5)))
+                out += [wav.squeeze().detach().cpu().numpy().astype(np.float32), gap]
+        return np.concatenate(out), sr
+
+    def _synth_f5(self, text):
+        import numpy as np
+
+        class _Quiet:                                   # no console/progress bars (pythonw has no console)
+            @staticmethod
+            def tqdm(it, *a, **k):
+                return it
+        with self.lock:
+            wav, sr, _ = self.f5.infer(ref_file=self.cb_ref, ref_text=self.ref_text, gen_text=text,
+                                       speed=float(config.get("tts_speed", 1.0)),
+                                       nfe_step=int(config.get("clone_steps", 32)),
+                                       show_info=lambda *a, **k: None, progress=_Quiet)
+        return np.asarray(wav, dtype=np.float32).reshape(-1), int(sr)
+
+    def synth(self, text):
+        import numpy as np
+        if self.engine == "clone" and (self.f5 or self.cb) is not None:
+            use_f5 = self.f5 is not None and config.get("clone_model", "f5") == "f5"
+            samples, sr = self._synth_f5(text) if use_f5 or self.cb is None else self._synth_clone(text)
+            if config.get("voice_effect", True):
+                samples = sage_effect(samples, sr)
+            return samples, sr
+        vid = self.voice_id()
+        lang = "en-gb" if vid.startswith("b") else "en-us"
+        with self.lock:
+            samples, sr = self.k.create(text, voice=vid, speed=float(config.get("tts_speed", 1.0)), lang=lang)
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if config.get("voice_effect", True):
+            samples = sage_effect(samples, int(sr))
+        return samples, int(sr)
+
+    def wav_bytes(self, text):
+        """Speech as a 16-bit WAV file in memory (sent to the phone app)."""
+        import wave
+        import numpy as np
+        samples, sr = self.synth(text)
+        pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(pcm.tobytes())
+        return buf.getvalue()
+
+
 class Voice:
     def __init__(self):
         self.q = queue.Queue()
@@ -950,48 +1209,50 @@ class Voice:
         self.whisper = None
         self._wlock = threading.Lock()
         self.frames, self.stream = [], None
+        self.neural = NeuralVoice()
+        self.neural.start()
         threading.Thread(target=self._tts_loop, daemon=True).start()
 
-    def _tts_loop(self):
-        import tempfile
-        wav = Path(tempfile.gettempdir()) / "great_sage_voice.wav"
+    def _system_renderer(self):
+        """The fallback voice: renders text to a WAV file (espeak on Linux, Windows voices via pyttsx3)."""
         espeak = shutil.which("espeak-ng") or shutil.which("espeak")
         if not IS_WINDOWS and espeak:
-            while True:
-                text = self.q.get()
-                self.speaking = True
-                try:
-                    subprocess.run([espeak, "-v", config.get("linux_voice", "en-us+f3"), "-s", "155",
-                                    "-w", str(wav), text], timeout=60, capture_output=True)
-                    self._play(wav)
-                except Exception:
-                    pass
-                time.sleep(0.3)
-                self.speaking = not self.q.empty()
+            def render(text, wav):
+                subprocess.run([espeak, "-v", config.get("linux_voice", "en-us+f3"), "-s", "155",
+                                "-w", str(wav), text], timeout=60, capture_output=True)
+            return render
         try:
             import pyttsx3
             engine = pyttsx3.init()
-            engine.setProperty("rate", 165)  # calm, measured pace
-            for v in engine.getProperty("voices"):  # prefer a female system voice (e.g. Zira)
+            engine.setProperty("rate", 165)
+            for v in engine.getProperty("voices"):   # prefer a female system voice (e.g. Zira)
                 if any(k in v.name.lower() for k in ("zira", "female", "hazel", "susan", "aria", "jenny")):
                     engine.setProperty("voice", v.id)
                     break
         except Exception:
-            return
+            return None
+
+        def render(text, wav):
+            engine.save_to_file(text, str(wav))
+            engine.runAndWait()
+        return render
+
+    def _tts_loop(self):
+        import tempfile
+        wav = Path(tempfile.gettempdir()) / "great_sage_voice.wav"
+        render = self._system_renderer()
         while True:
             text = self.q.get()
             self.speaking = True
             try:
-                # render speech to a file, then play it ourselves so the orb can follow every syllable
-                engine.save_to_file(text, str(wav))
-                engine.runAndWait()
-                self._play(wav)
+                if self.neural.ready and config.get("tts_engine", "kokoro") in ("kokoro", "clone"):
+                    samples, sr = self.neural.synth(text)          # natural AI voice
+                    self._play_samples(samples.reshape(-1, 1), sr)
+                elif render:
+                    render(text, wav)                                # system voice
+                    self._play(wav)
             except Exception:
-                try:
-                    engine.say(text)
-                    engine.runAndWait()
-                except Exception:
-                    pass
+                pass
             time.sleep(0.3)          # let the room go quiet before listening again
             self.speaking = not self.q.empty()
 
@@ -1005,6 +1266,13 @@ class Voice:
         if width != 2:
             raise ValueError("unsupported wav format")
         audio = (np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0).reshape(-1, ch)
+        self._play_samples(audio, sr)
+
+    def _play_samples(self, audio, sr):
+        """Play audio (float32, shape [samples, channels]) and report its loudness for the orb every 30 ms."""
+        import numpy as np
+        import sounddevice as sd
+        ch = audio.shape[1]
         block = max(1, int(sr * 0.03))                       # 30 ms steps = syllable-level detail
         self.playing = True
         try:
@@ -1190,8 +1458,9 @@ ORB_THEMES = {
 
 class OrbRenderer:
     """Draws one frame of the orb with real soft glow (Pillow), supersampled for smooth thin lines."""
-    def __init__(self, size, bg_hex, ss=3):
+    def __init__(self, size, bg_hex, ss=3, transparent=False):
         import random
+        self.transparent = transparent          # overlay mode: glow blends straight into the desktop
         self.size, self.S = size, int(size * ss)
         self.bg = tuple(int(bg_hex[i:i + 2], 16) for i in (1, 3, 5))
         rnd = random.Random(7)
@@ -1216,13 +1485,14 @@ class OrbRenderer:
         from PIL import Image, ImageDraw, ImageFilter
         if theme not in self._base:
             S, c = self.S, self.S / 2
-            img = Image.new("RGBA", (S, S), self.bg + (255,))
+            img = Image.new("RGBA", (S, S), self.bg + (0 if self.transparent else 255,))
             b = Image.new("RGBA", (S, S), self.bg + (0,))
             d = ImageDraw.Draw(b)
             for r, col in zip((0.40, 0.28, 0.17), ORB_THEMES[theme]["bloom"]):
                 d.ellipse((c - S * r, c - S * r, c + S * r, c + S * r), fill=col + (255,))
             b = b.filter(ImageFilter.GaussianBlur(S * 0.10))
-            b.putalpha(Image.eval(self._fade_mask(), lambda v: v * 0.9))
+            strength = 0.55 if self.transparent else 0.9
+            b.putalpha(Image.eval(self._fade_mask(), lambda v: v * strength))
             img.alpha_composite(b)
             self._base[theme] = img
         return self._base[theme]
@@ -1283,6 +1553,15 @@ class OrbRenderer:
         rr = S * 0.02 * boost
         d.ellipse((c - rr, c - rr, c + rr, c + rr), fill=(255, 255, 255, 255))
         img.alpha_composite(pin.filter(ImageFilter.GaussianBlur(S * 0.006)))
+        if self.transparent:                     # fade everything out before the square's edges
+            if getattr(self, "_edge", None) is None:
+                from PIL import ImageDraw as _D, ImageFilter as _F
+                m = Image.new("L", (S, S), 0)
+                _D.Draw(m).ellipse((S * 0.06, S * 0.06, S * 0.94, S * 0.94), fill=255)
+                self._edge = m.filter(_F.GaussianBlur(S * 0.05))
+            from PIL import ImageChops as _C
+            img.putalpha(_C.multiply(img.getchannel("A"), self._edge))
+            return img.resize((self.size, self.size), Image.LANCZOS)
         return img.convert("RGB").resize((self.size, self.size), Image.LANCZOS)
 
 
@@ -1306,6 +1585,10 @@ class Orb(tk.Label):
 
     def _tick(self):
         from PIL import ImageTk
+        if not self.winfo_ismapped():             # hidden (overlay mode / minimised): don't waste CPU
+            self.anim.step()
+            self.after(100, self._tick)
+            return
         self._photo = ImageTk.PhotoImage(self.renderer.frame(*self.anim.step()))
         self.configure(image=self._photo)
         self.after(33, self._tick)
@@ -1967,6 +2250,188 @@ class MindView(tk.Toplevel):
             self.cv.itemconfigure(self.hint, text="")
 
 
+class SageOverlay(tk.Toplevel):
+    """Overlay mode (Windows): the Great Sage floats on your desktop as just the orb, with no window around it.
+    Its replies appear beside it as a glowing system message that types out and fades away.
+    Click the orb to open the chat panel, drag it to move it, right-click it to show its mind."""
+    ORB = 150
+    W, H = 620, 220
+
+    def __init__(self, app):
+        import ctypes
+        super().__init__(app)
+        self.app = app
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        pos = config.get("overlay_pos")
+        if not (isinstance(pos, list) and 0 <= pos[0] < sw - 100 and 0 <= pos[1] < sh - 100):
+            pos = [sw - self.W - 6, 6]
+        self.geometry(f"{self.W}x{self.H}+{pos[0]}+{pos[1]}")
+        self.renderer = OrbRenderer(self.ORB, BG, ss=2, transparent=True)
+        self.anim = OrbAnimator(app.audio_level)
+        self.text, self.shown, self.hide_at, self.alpha = "", 0, None, 0.0
+        self._drag = None
+        self._dib = None
+        self._fonts()
+        self.update_idletasks()
+        u = ctypes.windll.user32
+        self.hwnd = u.GetParent(self.winfo_id())
+        GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TOOLWINDOW = -20, 0x80000, 0x80
+        u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, u.GetWindowLongW(self.hwnd, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_TOOLWINDOW)
+        if config.get("hide_from_screen_capture"):
+            u.SetWindowDisplayAffinity(self.hwnd, 0x11)
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Button-3>", lambda e: self.app.open_mind())
+        self._tick()
+
+    def _fonts(self):
+        from PIL import ImageFont
+        try:
+            self.f_body = ImageFont.truetype("consola.ttf", 15)
+        except Exception:
+            self.f_body = ImageFont.load_default()
+        self.f_head, self.head = self.f_body, "[ {} ]"
+        for name in ("msgothic.ttc", "YuGothB.ttc", "msyhbd.ttc", "msyh.ttc", "NotoSansCJK-Bold.ttc"):
+            try:                                   # a font that has the 《 》 brackets
+                self.f_head, self.head = ImageFont.truetype(name, 15), "《{}》"
+                break
+            except Exception:
+                pass
+
+    # --- messages
+    def show(self, text):
+        self.text = clean_for_speech(text)
+        self.shown, self.hide_at = 0, None
+
+    def orb_center(self):
+        return (self.winfo_rootx() + self.W - self.ORB / 2, self.winfo_rooty() + self.H / 2)
+
+    # --- mouse
+    def _press(self, e):
+        self._drag = (e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False)
+
+    def _motion(self, e):
+        if not self._drag:
+            return
+        x0, y0, wx, wy, moved = self._drag
+        if moved or abs(e.x_root - x0) + abs(e.y_root - y0) > 5:
+            self._drag = (x0, y0, wx, wy, True)
+            self.geometry(f"+{wx + e.x_root - x0}+{wy + e.y_root - y0}")
+
+    def _release(self, e):
+        drag, self._drag = self._drag, None
+        if drag and drag[4]:
+            self.app._save("overlay_pos", [self.winfo_x(), self.winfo_y()])
+        else:
+            self.app.toggle_panel()
+
+    # --- drawing
+    def _panel(self, text, alpha):
+        """The system-message box: 《Great Sage》 heading and the reply, wrapped to fit."""
+        from PIL import Image, ImageDraw
+        max_w, pad = self.W - self.ORB - 24, 12
+        words, lines, line = text.split(), [], ""
+        for w in words:
+            test = (line + " " + w).strip()
+            if self.f_body.getlength(test) <= max_w - 2 * pad:
+                line = test
+            else:
+                lines.append(line)
+                line = w
+        if line:
+            lines.append(line)
+        lines = lines[-7:]
+        lh = 19
+        width = int(min(max_w, max([self.f_body.getlength(l) for l in lines] + [150]) + 2 * pad))
+        height = pad * 2 + 22 + lh * max(1, len(lines))
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        a = lambda v: int(v * alpha)
+        d.rounded_rectangle((0, 0, width - 1, height - 1), radius=8, fill=(6, 14, 28, a(205)),
+                            outline=(41, 211, 255, a(210)), width=1)
+        d.text((pad, pad - 2), self.head.format(config["assistant_name"]), font=self.f_head, fill=(41, 211, 255, a(255)))
+        for i, l in enumerate(lines):
+            d.text((pad, pad + 22 + i * lh), l, font=self.f_body, fill=(205, 244, 255, a(255)))
+        return img
+
+    def _tick(self):
+        from PIL import Image
+        if not self.winfo_exists():
+            return
+        try:
+            if self.state() == "withdrawn":
+                self.after(150, self._tick)
+                return
+            self.anim.mode = self.app.orb.anim.mode
+            frame = self.renderer.frame(*self.anim.step())
+            img = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
+            if self.text:
+                if self.shown < len(self.text):
+                    self.shown = min(len(self.text), self.shown + 3)
+                elif self.hide_at is None:
+                    self.hide_at = time.time() + max(5.0, len(self.text) / 14)
+                fading = self.hide_at and time.time() > self.hide_at and not self.app.voice.speaking
+                self.alpha = max(0.0, self.alpha - 0.05) if fading else min(1.0, self.alpha + 0.15)
+                if fading and self.alpha <= 0:
+                    self.text = ""
+                else:
+                    panel = self._panel(self.text[:self.shown], self.alpha)
+                    x = self.W - self.ORB - 8 - panel.width
+                    img.alpha_composite(panel, (max(0, x), max(0, (self.H - panel.height) // 2)))
+            img.alpha_composite(frame, (self.W - self.ORB, (self.H - self.ORB) // 2))
+            self._push(img)
+        except Exception:
+            pass
+        self.after(33, self._tick)
+
+    def _push(self, img):
+        """Show an RGBA image with real per-pixel transparency (Windows layered window)."""
+        import ctypes
+        from ctypes import wintypes
+        import numpy as np
+        u, g = ctypes.windll.user32, ctypes.windll.gdi32
+        w, h = img.size
+        if self._dib is None:
+            class BIH(ctypes.Structure):
+                _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                            ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                            ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                            ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                            ("biClrImportant", wintypes.DWORD)]
+            g.CreateCompatibleDC.restype = ctypes.c_void_p
+            g.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+            g.CreateDIBSection.restype = ctypes.c_void_p
+            g.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT,
+                                           ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, wintypes.DWORD]
+            g.SelectObject.restype = ctypes.c_void_p
+            g.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            u.GetDC.restype = ctypes.c_void_p
+            u.GetDC.argtypes = [ctypes.c_void_p]
+            u.UpdateLayeredWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                              ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                                              wintypes.DWORD]
+            screen = u.GetDC(None)
+            mem = g.CreateCompatibleDC(screen)
+            bih = BIH(biSize=ctypes.sizeof(BIH), biWidth=w, biHeight=-h, biPlanes=1, biBitCount=32)
+            bits = ctypes.c_void_p()
+            bmp = g.CreateDIBSection(mem, ctypes.byref(bih), 0, ctypes.byref(bits), None, 0)
+            g.SelectObject(mem, bmp)
+            self._dib = (screen, mem, bits)
+        screen, mem, bits = self._dib
+        a = np.asarray(img, dtype=np.uint16)
+        alpha = a[:, :, 3:4]
+        rgb = (a[:, :, :3] * alpha // 255).astype(np.uint8)
+        bgra = np.dstack([rgb[:, :, 2], rgb[:, :, 1], rgb[:, :, 0], alpha[:, :, 0].astype(np.uint8)])
+        ctypes.memmove(bits, np.ascontiguousarray(bgra).tobytes(), w * h * 4)
+        size, src = wintypes.SIZE(w, h), wintypes.POINT(0, 0)
+        blend = (ctypes.c_ubyte * 4)(0, 0, 255, 1)          # AC_SRC_OVER, 0, 255, AC_SRC_ALPHA
+        u.UpdateLayeredWindow(self.hwnd, screen, None, ctypes.byref(size), mem, ctypes.byref(src), 0,
+                              ctypes.byref(blend), 2)        # ULW_ALPHA
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=BG)
@@ -2067,6 +2532,8 @@ class App(ctk.CTk):
         ctk.CTkButton(bottom, text="Send", width=70, command=self.send, **btn).pack(side="left")
         self.status = ctk.CTkLabel(body, text="", text_color=DIM, font=(FONT, 11))
         self.status.pack(pady=(0, 8))
+        self.voice.neural.on_status = lambda m: self.after(0, lambda: self.status.configure(
+            text=m or self.idle_text()))
         self.row, self.bottom = row, bottom
 
         self._setup_hotkey()
@@ -2085,6 +2552,17 @@ class App(ctk.CTk):
         if config["live_screen_enabled"]:
             self.screen.start()
         self.set_state("idle", self.idle_text())
+
+        self.overlay = None
+        self._panel_was_open = False
+        if IS_WINDOWS and config.get("display_mode", "overlay") == "overlay":
+            try:
+                self.overlay = SageOverlay(self)
+                self.withdraw()                          # just the floating orb; click it to open this panel
+            except Exception as e:
+                self.overlay = None
+                self.after(1500, lambda: self.add_message(config["assistant_name"],
+                                                          f"Notice. Overlay mode could not start: {e}"))
 
         greeting = f"Notice. Great Sage is online. Awaiting your query{title_suffix()}." \
             if config["assistant_name"] == "Great Sage" else f"Notice. Online. Awaiting your query{title_suffix()}."
@@ -2105,8 +2583,31 @@ class App(ctk.CTk):
         right = self.winfo_x() + self.winfo_width()           # remember where the full widget's corner is
         self._save("window_pos", [right - self.full_size[0], self.winfo_y()])
 
+    def toggle_panel(self):
+        """Overlay mode: open or close the chat panel next to the floating orb."""
+        if self.state() == "normal":
+            self.withdraw()
+        else:
+            self._show_panel()
+
+    def _show_panel(self):
+        if self.overlay:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            w, h = self.full_size
+            x = min(max(0, self.overlay.winfo_x() + self.overlay.W - w), sw - w)
+            y = self.overlay.winfo_y() + self.overlay.H - 10
+            if y + h > sh - 40:                          # not enough room below the orb: open above it
+                y = max(0, self.overlay.winfo_y() - h + 10)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        self.after(50, self.entry.focus_force)
+
     def toggle_compact(self):
         """Shrink to just the orb (still listening for "Great Sage"), or expand back."""
+        if self.overlay:                                 # in overlay mode the orb already lives on the desktop
+            self.withdraw()
+            return
         right, y = self.winfo_x() + self.winfo_width(), self.winfo_y()
         self.compact = not self.compact
         if self.compact:
@@ -2128,6 +2629,9 @@ class App(ctk.CTk):
 
     def show_from_other(self):
         """The desktop shortcut was opened again: bring this one forward instead of starting a second copy."""
+        if self.overlay:
+            self._show_panel()
+            return
         self.deiconify()
         if self.compact:
             self.toggle_compact()
@@ -2155,6 +2659,12 @@ class App(ctk.CTk):
         if self.mind:
             self.mind.close()
             return
+        if self.overlay:
+            if self.state() == "normal" and self.focus_displayof() is not None:
+                self.withdraw()
+            else:
+                self._show_panel()
+            return
         visible = self.state() == "normal" and not self.compact
         if visible and self.focus_displayof() is not None:
             self.toggle_compact()                     # already open and in use: tuck it away
@@ -2164,7 +2674,7 @@ class App(ctk.CTk):
     def on_alarm(self, item, late):
         """A reminder, timer or alarm went off."""
         play_chime()
-        if self.state() != "normal" or self.compact:
+        if not self.overlay and (self.state() != "normal" or self.compact):
             self.show_from_other()
         when = datetime.datetime.fromtimestamp(item["due"])
         if late:
@@ -2230,8 +2740,13 @@ class App(ctk.CTk):
             return
         self.set_state("idle", "Displaying mind...")
         self.speak("Report. Displaying connected applications.")
-        start = (self.orb.winfo_rootx() + self.orb.winfo_width() / 2,     # where the orb is now...
-                 self.orb.winfo_rooty() + self.orb.winfo_height() / 2)
+        if self.overlay:
+            start = self.overlay.orb_center()
+            self._panel_was_open = self.state() == "normal"
+            self.overlay.withdraw()
+        else:
+            start = (self.orb.winfo_rootx() + self.orb.winfo_width() / 2,     # where the orb is now...
+                     self.orb.winfo_rooty() + self.orb.winfo_height() / 2)
         self.withdraw()                              # ...it glides from there to the centre of the screen
         try:
             self.mind = MindView(self, start)
@@ -2242,7 +2757,12 @@ class App(ctk.CTk):
 
     def on_mind_closed(self):
         self.mind = None
-        self.deiconify()
+        if self.overlay:
+            self.overlay.deiconify()
+            if self._panel_was_open:
+                self.deiconify()
+        else:
+            self.deiconify()
         self.set_state("idle", self.idle_text())
 
     def idle_text(self):
@@ -2259,6 +2779,8 @@ class App(ctk.CTk):
 
     def add_message(self, who, text, typewriter=False):
         is_user = who == "You"
+        if getattr(self, "overlay", None) is not None and not is_user:
+            self.overlay.show(text)                      # the reply appears beside the floating orb
         self.log.configure(state="normal")
         self.log.insert("end", f"《{who}》\n", "user_tag" if is_user else "sage_tag")
         self.log.configure(state="disabled")
@@ -2363,6 +2885,22 @@ class App(ctk.CTk):
             return
         if _MIND_RE.search(text):
             self.open_mind()
+            return
+        vm = _VOICE_RE.match(text.strip())
+        if vm:
+            result = self.runner.t_set_voice(vm.group("name"))
+            self._quick(lambda: ("Report. " + result + " This is how I sound now."
+                                 if result.startswith("Voice changed") else "Notice. " + result))
+            return
+        em = _EFFECT_RE.search(text)
+        if em:
+            on = (em.group("state") or em.group("state2")).lower() == "on"
+            self._save("voice_effect", on)
+            self._quick(lambda: f"Report. Voice effect {'enabled' if on else 'disabled'}.")
+            return
+        if _VOICE_LIST_RE.search(text):
+            self._quick(lambda: "Answer. My voices are " + ", ".join(VOICE_NAMES) + ". Heart and Bella are the "
+                        "most natural. Say, change your voice to, followed by a name.")
             return
         if _PHONE_INFO_RE.search(text):
             self.show_phone_info()
@@ -2487,7 +3025,8 @@ class PhoneLink:
             def _allowed(self):
                 try:
                     ip = ipaddress.ip_address(self.client_address[0])
-                    if not (ip.is_private or ip.is_loopback):
+                    tailscale = ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10")
+                    if not (ip.is_private or ip.is_loopback or tailscale):
                         return False
                 except ValueError:
                     return False
@@ -2510,6 +3049,17 @@ class PhoneLink:
                     payload = json.loads(self.rfile.read(length) or b"{}")
                     if self.path.startswith("/llm"):
                         return self._send(200, link.handle_llm(payload))
+                    if self.path.startswith("/tts"):
+                        nv = link.app.voice.neural
+                        if not nv.ready:
+                            return self._send(503, {"error": "The PC voice isn't ready."})
+                        data = nv.wav_bytes(str(payload.get("text", ""))[:4000])
+                        self.send_response(200)
+                        self.send_header("Content-Type", "audio/wav")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
                     self._send(404, {"error": "not found"})
                 except requests.exceptions.ConnectionError:
                     self._send(503, {"error": "The local AI (Ollama) isn't running on the PC."})
@@ -2554,6 +3104,11 @@ class PhoneLink:
             self.app.after(0, lambda: self.app.set_state("idle", self.app.idle_text()))
 
 
+_VOICE_RE = re.compile(r"^(great sage[,\s]+)?(please\s+)?(change|switch|set|use)\s+(your\s+|the\s+)?voice\s+(to\s+)?"
+                       r"(?P<name>[a-z_]+)[.!]*$", re.I)
+_EFFECT_RE = re.compile(r"\b(turn|switch)\s+(?P<state>on|off)\s+(the\s+|your\s+)?(voice\s+)?(effect|echo)\b|"
+                        r"\b(voice\s+)?(effect|echo)\s+(?P<state2>on|off)\b", re.I)
+_VOICE_LIST_RE = re.compile(r"\b(list|what|which|show)( are)?( your| the)? voices\b|\bvoice (list|options)\b", re.I)
 _PHONE_INFO_RE = re.compile(r"\b(phone link|pair (my )?phone|connect (my )?phone|link (my )?phone)\b", re.I)
 
 

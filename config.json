@@ -1,0 +1,6 @@
+{
+  "config_version": 4,
+  "tts_engine": "clone",
+  "clone_voice_file": "voice/great_sage.wav",
+  "clone_model": "f5"
+}

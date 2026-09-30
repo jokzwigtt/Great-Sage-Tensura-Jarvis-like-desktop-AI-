@@ -18,3 +18,10 @@ android/build/
 android/app/build/
 android/local.properties
 *.apk
+voice_model/
+# Voice clips used for the cloned voice - keep them off GitHub.
+*.wav
+*.ogg
+voice_samples/
+voice_lines/
+voice/

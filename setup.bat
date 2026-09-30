@@ -11,6 +11,12 @@ if errorlevel 1 (
 )
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+echo Installing the natural AI voice (Kokoro)...
+python -m pip install kokoro-onnx --ignore-requires-python || echo The AI voice could not be installed - the Windows voice will be used instead.
+if exist "voice\great_sage.wav" (
+  echo Installing the Great Sage cloned voice - needs an NVIDIA graphics card...
+  call install_cloned_voice.bat
+)
 
 echo === 2/3 Checking Ollama (local AI brain) ===
 where ollama >nul 2>&1
